@@ -85,7 +85,7 @@ void executeCommand(vector<string>&tokens,bool background){
         return;
     }
 
-    // 🔹 Kill a background or foreground job
+    // Kill a background or foreground job
     if (tokens[0] == "kill") {
     if (tokens.size() < 2) {
         cout << "Usage: kill <job_id>\n";
@@ -118,7 +118,7 @@ void executeCommand(vector<string>&tokens,bool background){
     //Handle Windows internal commands
     vector<string> internalCmds = {
     // File & Directory Management
-    "dir", "cd", "chdir", "md", "mkdir", "rd", "rmdir",
+    "dir", "chdir", "md", "mkdir", "rd", "rmdir",
     "copy", "move", "del", "erase", "ren", "rename", "type",
     "attrib", "tree", "xcopy", "robocopy",
 
@@ -141,6 +141,19 @@ void executeCommand(vector<string>&tokens,bool background){
     "cmd", "exit"
 };
 
+// Handle 'cd' command internally (so it persists)
+if (tokens[0] == "cd" || tokens[0] == "chdir") {
+    if (tokens.size() < 2) {
+        cout << fs::current_path() << endl; // Show current directory if no argument
+    } else {
+        try {
+            fs::current_path(tokens[1]);
+        } catch (const std::exception &e) {
+            cerr << "The system cannot find the path specified: " << tokens[1] << endl;
+        }
+    }
+    return;
+}
     bool isInternal = false;
     for (auto &cmd : internalCmds)
         if (tokens[0] == cmd) { isInternal = true; break; }
@@ -182,7 +195,8 @@ int main(){
     string input;
     while (true)
     {
-        cout<<"cshell>";    //shell prompt
+        cout << "cshell(" << fs::current_path().string() << ")>";
+            //shell prompt
         if(!getline(cin,input)) break; //get inputline
 
         if(cin.eof() || input=="exit" || input=="EXIT" || input=="Exit"){ //code to check for quitting shell
