@@ -1,0 +1,16 @@
+ Volume in drive C has no label.
+ Volume Serial Number is EA36-FF84
+
+ Directory of C:\Users\ROSHAN\Desktop\Capstone\Custom_Shell_Implementation
+
+09-Nov-25  03:03 PM    <DIR>          .
+09-Nov-25  10:07 AM    <DIR>          ..
+07-Nov-25  02:39 AM    <DIR>          .vscode
+09-Nov-25  02:55 PM               620 files.txt
+06-Nov-25  09:38 AM               139 README.md
+09-Nov-25  02:53 PM           381,117 sh.exe
+09-Nov-25  12:30 PM           381,117 sh.exee
+09-Nov-25  12:12 PM            14,832 shell.cpp
+09-Nov-25  03:03 PM                 0 temp.txt
+               6 File(s)        777,825 bytes
+               3 Dir(s)  112,585,469,952 bytes free

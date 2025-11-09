@@ -1,20 +1,18 @@
-#include<iostream>
-#include<string>
-#include<sstream>
-#include<vector>
-// #include<unistd.h>
-// #include<sys/types.h>
-#include <process.h>
-#include <errno.h>
-#include<map>
-#include<windows.h>
-#include <filesystem>
-
+#include<iostream> // input/output
+#include<string> // string operations
+#include<sstream> // string manipulation
+#include<vector> // for lists and token storage
+#include <process.h>//process creation and mnagement
+#include <errno.h>//error code for system-level function
+#include<map> // for value pair data structre
+#include<windows.h>//for main windows API header 
+#include <filesystem>//tools for dictionaries and files
+#include <fstream> // for piping through temporary file handling
 
 using namespace std;
 namespace fs = std::filesystem;
 
-// To split words into tokens
+// Split input line into tokens
 vector<string> parseInput(const string &input){
     vector<string> tokens;
     stringstream ss(input);
@@ -38,7 +36,7 @@ struct Job{
 map<int,Job> jobs;
 int jobCounter = 1;
 
-// Function to check if command should run in background (&)
+// Detect if command should run in background (&)
 bool isBackgroundCommand(string &input){
     if(!input.empty() && input.back()=='&'){
         input.pop_back();
@@ -47,222 +45,53 @@ bool isBackgroundCommand(string &input){
     return false;
 }
 
-// Function that executes the user command
-void executeCommand(vector<string>&tokens,bool background){
-    if(tokens.empty()) return;
+// helper structs for window search by PID
+struct EnumData { DWORD pid; HWND hwnd; };
 
-    // Exit command handling
-    if(tokens[0] == "exit"){
-        cout<<"Exiting shell..."<<endl;
-        exit(0);
+BOOL CALLBACK EnumWindowsCallback(HWND hwnd, LPARAM lParam) {
+    EnumData* data = (EnumData*)lParam;
+    DWORD windowPid = 0;
+    GetWindowThreadProcessId(hwnd, &windowPid);
+    if (windowPid == data->pid && IsWindowVisible(hwnd) && GetWindow(hwnd, GW_OWNER) == NULL) {
+        data->hwnd = hwnd;
+        return FALSE; 
     }
+    return TRUE; 
+}
 
-    // Show list of background jobs
-    if(tokens[0]=="jobs"){
-        for(auto &[id,job]:jobs){
-            cout<<"["<<id<<"] "
-                <<(job.running ? "Running " : "Stopped ")
-                <<job.command<<" (PID: "<<job.pid<<")\n";
-        }
-        return;
-    }
+HWND FindMainWindowByPID(DWORD pid) {
+    EnumData data;
+    data.pid = pid;
+    data.hwnd = NULL;
+    EnumWindows(EnumWindowsCallback, (LPARAM)&data);
+    return data.hwnd;
+}
 
-    // Bring a background job to foreground
-    if (tokens[0]=="fg"){
-        if(tokens.size()<2){
-            cout<<"Usage: fg <job_id>"<<endl; // 🔹 added missing ">"
-            return;
-        }
-        int jobID=stoi(tokens[1]);
-        if (jobs.find(jobID) != jobs.end()) {
-            Job &job = jobs[jobID];
-            cout << "Bringing job " << jobID << " (" << job.command << ") to foreground...\n";
-            WaitForSingleObject(OpenProcess(SYNCHRONIZE, FALSE, job.pid), INFINITE);
-            job.running = false;
-        } else {
-            cout << "No such job ID.\n";
-        }
-        return;
-    }
-
-    // Kill a background or foreground job
-    if (tokens[0] == "kill") {
-        if (tokens.size() < 2) {
-            cout << "Usage: kill <job_id>\n";
-            return;
-        }
-        int jobID = stoi(tokens[1]);
-        if (jobs.find(jobID) != jobs.end()) {
-            Job &job = jobs[jobID];
-            HANDLE hProcess = OpenProcess(PROCESS_TERMINATE, FALSE, job.pid);
-            if (hProcess) {
-                TerminateProcess(hProcess, 0);
-                CloseHandle(hProcess);
-                job.running = false;
-                cout << "Job [" << jobID << "] (" << job.command << ") terminated.\n";
-            } else {
-                cout << "Failed to terminate via API. Trying taskkill...\n";
-                string cmd = "taskkill /PID " + to_string(job.pid) + " /F";
-                system(cmd.c_str());
-            }
-        } else {
-            cout << "No such job ID.\n";
-        }
-        return;
-    }
-
-    // Output redirection detection > and >>
-    string outFile = "";
-    bool appendMode = false;
-    for (size_t i = 0; i < tokens.size(); i++) {
-        if (tokens[i] == ">" || tokens[i] == ">>") {
-            if (i + 1 < tokens.size()) {
-                outFile = tokens[i + 1];
-                appendMode = (tokens[i] == ">>");
-                tokens.erase(tokens.begin() + i, tokens.begin() + i + 2);
-            } else {
-                cerr << "Syntax error near '>'\n";
-                return;
-            }
-            break;
-        }
-    }
-
-    // Input redirection detection <
-    string inFile = "";
-    for (size_t i = 0; i < tokens.size(); i++) {
-        if (tokens[i] == "<") {
-            if (i + 1 < tokens.size()) {
-                inFile = tokens[i + 1];
-                tokens.erase(tokens.begin() + i, tokens.begin() + i + 2);
-            } else {
-                cerr << "Syntax error near '<'\n";
-                return;
-            }
-            break;
-        }
-    }
-
-    FILE* saved_stdout = nullptr;
+// Executes a single command (used in piping)
+void executeSingleCommand(vector<string> tokens, string inputFile = "", string outputFile = "", bool append = false){
     FILE* saved_stdin = nullptr;
+    FILE* saved_stdout = nullptr;
 
-    // redirect stdout if output redirection is specified
-    if (!outFile.empty()) {
-        saved_stdout = stdout;
-        freopen(outFile.c_str(), appendMode ? "a" : "w", stdout);
-    }
-
-    // redirect stdin if input redirection is specified
-    if (!inFile.empty()) {
+    if (!inputFile.empty()) {
         saved_stdin = stdin;
-        FILE* f = freopen(inFile.c_str(), "r", stdin);
+        FILE* f = freopen(inputFile.c_str(), "r", stdin);
         if (!f) {
-            cerr << "Error opening input file: " << inFile << endl;
-            if (saved_stdout) {
-                fflush(stdout);
-                freopen("CONOUT$", "w", stdout);
-            }
+            cerr << "Error opening input file: " << inputFile << endl;
             return;
         }
     }
 
-    // for converting vector<string> to char* array for _spawnvp()
+    if (!outputFile.empty()) {
+        saved_stdout = stdout;
+        freopen(outputFile.c_str(), append ? "a" : "w", stdout);
+    }
+
     vector<char*> cmdArgs;
     for (auto &arg : tokens) cmdArgs.push_back(&arg[0]);
     cmdArgs.push_back(NULL);
 
-    //Handle Windows internal commands
-    vector<string> internalCmds = {
-        // File & Directory Management
-        "dir", "chdir", "md", "mkdir", "rd", "rmdir",
-        "copy", "move", "del", "erase", "ren", "rename", "type",
-        "attrib", "tree", "xcopy", "robocopy",
+    _spawnvp(_P_WAIT, cmdArgs[0], cmdArgs.data());
 
-        // Display / Screen / Prompt
-        "cls", "color", "title", "echo", "prompt",
-
-        // System Information
-        "ver", "vol", "path", "assoc", "ftype",
-
-        // Time & Date
-        "date", "time",
-
-        // Batch / Control Commands
-        "call", "if", "for", "goto", "pause", "set", "setlocal", "endlocal", "shift",
-
-        // System Utilities
-        "tasklist", "taskkill", "shutdown", "help",
-
-        // Misc
-        "cmd", "exit"
-    };
-
-    // Handle 'cd' command internally 
-    if (tokens[0] == "cd" || tokens[0] == "chdir") {
-        if (tokens.size() < 2) {
-            cout << fs::current_path() << endl; // Show current directory if no argument
-        } else {
-            try {
-                fs::current_path(tokens[1]);
-            } catch (const std::exception &e) {
-                cerr << "The system cannot find the path specified: " << tokens[1] << endl;
-            }
-        }
-        if (saved_stdout) {
-            fflush(stdout);
-            freopen("CONOUT$", "w", stdout);
-        }
-        if (saved_stdin) {
-            fflush(stdin);
-            freopen("CONIN$", "r", stdin);
-        }
-        return;
-    }
-
-    bool isInternal = false;
-    for (auto &cmd : internalCmds)
-        if (tokens[0] == cmd) { isInternal = true; break; }
-
-    if (isInternal) {
-        vector<char*> cmdArgs2 = {(char*)"cmd", (char*)"/c"};
-        for (auto &arg : tokens)
-            cmdArgs2.push_back(&arg[0]);
-        cmdArgs2.push_back(NULL);
-
-        if (background) { // Run internal command in background
-            int pid = _spawnvp(_P_NOWAIT, "cmd", cmdArgs2.data());
-            if (pid != -1) {
-                jobs[jobCounter] = {jobCounter, pid, tokens[0], true};
-                cout << "[" << jobCounter++ << "] Running in background (PID: " << pid << ")\n";
-            } else perror("Background command failed");
-        } else { // Run internal command in foreground
-            _spawnvp(_P_WAIT, "cmd", cmdArgs2.data());
-        }
-        if (saved_stdout) {
-            fflush(stdout);
-            freopen("CONOUT$", "w", stdout);
-        }
-        if (saved_stdin) {
-            fflush(stdin);
-            freopen("CONIN$", "r", stdin);
-        }
-        return;
-    }
-
-    // To Handle external commands (e.g., notepad, calc, etc.)
-    if (background) {
-        int pid = _spawnvp(_P_NOWAIT, cmdArgs[0], cmdArgs.data());
-        if (pid != -1) {
-            jobs[jobCounter] = {jobCounter, pid, tokens[0], true};
-            cout << "[" << jobCounter++ << "] Running in background (PID: " << pid << ")\n";
-        } else perror("Background command failed");
-    } else {
-        int result = _spawnvp(_P_WAIT, cmdArgs[0], cmdArgs.data());
-        if (result == -1)
-            perror("Command execution failed");
-    }
-
-    // Restore stdout and stdin if redirected
     if (saved_stdout) {
         fflush(stdout);
         freopen("CONOUT$", "w", stdout);
@@ -273,38 +102,260 @@ void executeCommand(vector<string>&tokens,bool background){
     }
 }
 
+// Execute full user command
+void executeCommand(vector<string>&tokens,bool background){
+    if(tokens.empty()) return;
 
+    // Detect "bg" keyword to force background mode
+    bool forceBackground = false;
+    if (tokens[0] == "bg") {
+        forceBackground = true;
+        tokens.erase(tokens.begin());
+    }
+
+    if (forceBackground) background = true;
+
+    // auto delegate to cmd.exe if command contains |, >, or <
+    string rawCommand;
+    for (const auto &t : tokens) rawCommand += t + " ";
+
+    // for detecting redirections and pipelines
+    if (rawCommand.find("|") != string::npos || 
+        rawCommand.find(">") != string::npos || 
+        rawCommand.find("<") != string::npos) {
+
+        // Use cmd.exe to execute combined redirection/pipeline commands
+        string cmdLine = "/c " + rawCommand;
+
+        if (background) {
+            int pid = _spawnlp(_P_NOWAIT, "cmd", "cmd", cmdLine.c_str(), NULL);
+            if (pid != -1) {
+                jobs[jobCounter] = {jobCounter, pid, rawCommand, true};
+                cout << "[" << jobCounter++ << "] Running pipeline/redirection in background (PID: " << pid << ")\n";
+            } else perror("Background pipeline failed");
+        } else {
+            int ret = system(("cmd " + cmdLine).c_str());
+            if (ret != 0)
+                cerr << "Command failed or syntax incorrect.\n";
+        }
+        return;
+    }
+
+    // Exit shell
+    if(tokens[0] == "exit"){
+        cout<<"Exiting shell..."<<endl;
+        exit(0);
+    }
+
+    // Display background jobs
+    if(tokens[0]=="jobs"){
+        for(auto &[id,job]:jobs){
+            cout<<"["<<id<<"] "
+                <<(job.running ? "Running " : "Stopped ")
+                <<job.command<<" (PID: "<<job.pid<<")\n";
+        }
+        return;
+    }
+
+    // Bring background job to foreground
+    if (tokens[0] == "fg") {
+        if (tokens.size() < 2) {
+            cout << "Usage: fg <job_id>\n";
+            return;
+        }
+
+        int jobID = stoi(tokens[1]);
+        if (jobs.find(jobID) != jobs.end()) {
+            Job &job = jobs[jobID];
+
+            HWND hwnd = FindMainWindowByPID((DWORD)job.pid);
+            if (hwnd) {
+                if (SetForegroundWindow(hwnd)) {
+                    cout << "Brought job " << jobID << " (" << job.command << ") window to front.\n";
+                } else {
+                    cout << "Found window but SetForegroundWindow failed (may be blocked by OS policy).\n";
+                }
+            } else {
+                cout << "Could not find window for " << job.command << ". Waiting for it to finish instead...\n";
+                HANDLE hProc = OpenProcess(SYNCHRONIZE, FALSE, job.pid);
+                if (hProc) {
+                    WaitForSingleObject(hProc, INFINITE);
+                    CloseHandle(hProc);
+                    job.running = false;
+                    cout << "Job [" << jobID << "] has finished.\n";
+                } else {
+                    cout << "Unable to open process. It may have already exited.\n";
+                }
+            }
+        } else {
+            cout << "No such job ID.\n";
+        }
+        return;
+    }
+
+    // Kill job
+    if (tokens[0] == "kill") {
+        if (tokens.size() < 2) {
+            cout << "Usage: kill <job_id>\n";
+            return;
+        }
+
+        int jobID = stoi(tokens[1]);
+        if (jobs.find(jobID) != jobs.end()) {
+            Job &job = jobs[jobID];
+            cout << "Attempting to terminate Job [" << jobID << "] (" << job.command << ")...\n";
+
+            bool killed = false;
+
+            // Try PID-based termination first
+            string cmd = "taskkill /PID " + to_string(job.pid) + " /F >nul 2>&1";
+            int result = system(cmd.c_str());
+            if (result == 0) {
+                cout << "Job [" << jobID << "] terminated successfully.\n";
+                job.running = false;
+                killed = true;
+            }
+
+            // If that fails, try killing by image name (e.g., notepad.exe)
+            if (!killed) {
+                string exeName = job.command + ".exe";
+                string cmd2 = "taskkill /IM " + exeName + " /F >nul 2>&1";
+                int result2 = system(cmd2.c_str());
+                if (result2 == 0) {
+                    cout << "Job [" << jobID << "] (" << exeName << ") terminated using /IM.\n";
+                    job.running = false;
+                    killed = true;
+                }
+            }
+
+            // If that still fails, handle special UWP apps (like Calculator)
+            if (!killed && (job.command == "calc" || job.command == "calculator")) {
+                string uwpKillCmd = "powershell -Command \"Get-Process CalculatorApp -ErrorAction SilentlyContinue | Stop-Process -Force\"";
+                int uwpResult = system(uwpKillCmd.c_str());
+                if (uwpResult == 0) {
+                    cout << "UWP app (Calculator) terminated successfully.\n";
+                    job.running = false;
+                    killed = true;
+                }
+            }
+
+            if (!killed) {
+                cout << "Failed to terminate Job [" << jobID << "]. Process may have already exited or is protected.\n";
+            }
+
+        } else {
+            cout << "No such job ID.\n";
+        }
+        return;
+    }
+
+    // Handle internal commands
+    vector<char*> cmdArgs;
+    for (auto &arg : tokens) cmdArgs.push_back(&arg[0]);
+    cmdArgs.push_back(NULL);
+
+    vector<string> internalCmds = {
+        "dir", "chdir", "md", "mkdir", "rd", "rmdir",
+        "copy", "move", "del", "erase", "ren", "rename", "type",
+        "attrib", "tree", "xcopy", "robocopy",
+        "cls", "color", "title", "echo", "prompt",
+        "ver", "vol", "path", "assoc", "ftype",
+        "date", "time",
+        "call", "if", "for", "goto", "pause", "set", "setlocal", "endlocal", "shift",
+        "tasklist", "taskkill", "shutdown", "help",
+        "cmd", "exit"
+    };
+
+    // Handle cd internally
+    if (tokens[0] == "cd" || tokens[0] == "chdir") {
+        if (tokens.size() < 2) {
+            cout << fs::current_path() << endl;
+        } else {
+            try {
+                fs::current_path(tokens[1]);
+            } catch (const std::exception &e) {
+                cerr << "The system cannot find the path specified: " << tokens[1] << endl;
+            }
+        }
+        return;
+    }
+
+    bool isInternal = false;
+    for (auto &cmd : internalCmds)
+        if (tokens[0] == cmd) { isInternal = true; break; }
+
+    // Execute internal command through CMD
+    if (isInternal) {
+        vector<char*> cmdArgs2 = {(char*)"cmd", (char*)"/c"};
+        for (auto &arg : tokens)
+            cmdArgs2.push_back(&arg[0]);
+        cmdArgs2.push_back(NULL);
+
+        if (background) {
+            int pid = _spawnvp(_P_NOWAIT, "cmd", cmdArgs2.data());
+            if (pid != -1) {
+                jobs[jobCounter] = {jobCounter, pid, tokens[0], true};
+                cout << "[" << jobCounter++ << "] Running in background (PID: " << pid << ")\n";
+            } else perror("Background command failed");
+        } else {
+            _spawnvp(_P_WAIT, "cmd", cmdArgs2.data());
+        }
+        return;
+    }
+
+    // Handle external commands (e.g., notepad, calc)
+    if (background) {
+        STARTUPINFO si = { sizeof(STARTUPINFO) };
+        PROCESS_INFORMATION pi;
+
+        string fullCommand;
+        for (auto &t : tokens) fullCommand += t + " ";
+
+        if (CreateProcessA(
+                NULL,
+                (LPSTR)fullCommand.c_str(),
+                NULL, NULL, FALSE,
+                CREATE_NEW_CONSOLE,
+                NULL, NULL,
+                &si, &pi))
+        {
+            int pid = (int)pi.dwProcessId;
+            CloseHandle(pi.hProcess);
+            CloseHandle(pi.hThread);
+
+            jobs[jobCounter] = { jobCounter, pid, tokens[0], true };
+            cout << "[" << jobCounter++ << "] Running in background (PID: " << pid << ")\n";
+        } else {
+            perror("Background command failed");
+        }
+    } else {
+        int result = _spawnvp(_P_WAIT, cmdArgs[0], cmdArgs.data());
+        if (result == -1)
+            perror("Command execution failed");
+    }
+}
+
+//main function 
 int main(){
     string input;
     while (true)
     {
         cout << "cshell(" << fs::current_path().string() << ")>";
-            //shell prompt
-        if(!getline(cin,input)) break; //get inputline
+        if(!getline(cin,input)) break;
 
-        if(cin.eof() || input=="exit" || input=="EXIT" || input=="Exit"){ //code to check for quitting shell
+        if(cin.eof() || input=="exit" || input=="EXIT" || input=="Exit"){
             cout<<"Exiting shell..."<<endl;
             break;
         }
 
-        // Detect if & is present at end of command
         bool background = isBackgroundCommand(input);
-
-        vector<string> tokens = parseInput(input);   //parsing input to tokens
+        vector<string> tokens = parseInput(input);
 
         if(tokens.empty())
             continue;
 
-        // Execute command using our function
         executeCommand(tokens, background);
 
-        /*
-        For Showing Tokens
-        cout<<"Parsed tokens: ";    
-        for (const string &t : tokens){     //showing parsed tokens 
-            cout<<"["<<t<<"]";
-        }
-        cout<<endl;*/
     }
     return 0;
 }
